@@ -163,6 +163,16 @@ def abbr_pkr(x: float) -> str:
         return f"{x/1_000:.0f}k"
     return f"{x:.0f}"
 
+def abbr_k(x: float) -> str:
+    if x is None or (isinstance(x, float) and np.isnan(x)):
+        return ""
+    x = float(x)
+    ax = abs(x)
+    if ax >= 1_000_000:
+        return f"{x/1_000_000:.1f}M".replace(".0M", "M")
+    if ax >= 1_000:
+        return f"{x/1_000:.0f}K"
+    return f"{x:.0f}"
 
 
 
@@ -575,3 +585,184 @@ st.dataframe(
 )
 
 print_mode = st.sidebar.toggle("📄 Print / PDF mode", value=False)
+
+
+COMPLAINTS_FILE_PATH = "Complaints for 2025.xlsx"
+
+@st.cache_data
+def load_complaints():
+    return pd.read_excel(COMPLAINTS_FILE_PATH)
+
+complaints_raw = load_complaints()
+
+# ------------------------------------------------------------
+# FILTER: ONLY COMPLAINTS (exclude info, activation, deactivation)
+# ------------------------------------------------------------
+complaints = complaints_raw.copy()
+
+# Ensure DESCRIPTION exists and is string
+complaints["DESCRIPTION"] = complaints["DESCRIPTION"].astype(str).fillna("")
+
+def is_complaint(desc: str) -> bool:
+    parts = [p.strip() for p in desc.split("-")]
+    # We need: <something> - Complaints - <something>
+    if len(parts) >= 2:
+        return parts[1].lower() in ["complaints", "complaint"]
+    return False
+
+complaints = complaints[complaints["DESCRIPTION"].apply(is_complaint)].copy()
+
+# --- Exclude FikrFree complaints completely
+complaints = complaints[
+    ~complaints["Product"].astype(str).str.contains("fikr", case=False, na=False)
+    & ~complaints["DESCRIPTION"].astype(str).str.contains("fikr", case=False, na=False)
+].copy()
+
+
+MONTH_COLS = [
+    "Jan_25", "Feb_25", "Mar_25", "Apr_25", "May_25", "Jun_25",
+    "Jul_25", "Aug_25", "Sep_25", "Oct_25", "Nov_25", "Dec_25"
+]
+
+complaints_long = complaints.melt(
+    id_vars=["Product"],
+    value_vars=MONTH_COLS,
+    var_name="Month",
+    value_name="Complaints"
+)
+
+complaints_long["Complaints"] = pd.to_numeric(complaints_long["Complaints"], errors="coerce").fillna(0)
+
+# --- Month cleanup + enforce correct order (Jan -> Dec)
+MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+month_order = {m: i for i, m in enumerate(MONTHS, start=1)}
+
+complaints_long["Month"] = complaints_long["Month"].astype(str).str.replace("_25", "", regex=False).str.strip()
+complaints_long["Month_num"] = complaints_long["Month"].map(month_order)
+
+# Safety: drop any rows where month couldn't be mapped (if any weird columns exist)
+complaints_long = complaints_long.dropna(subset=["Month_num"]).copy()
+complaints_long["Month_num"] = complaints_long["Month_num"].astype(int)
+
+# Sort once here so everything downstream stays ordered
+complaints_long = complaints_long.sort_values("Month_num")
+
+
+
+st.subheader("📅 Complaints – Month by Month")
+
+st.subheader("📅 Complaints – Month by Month")
+
+complaints_mom = (
+    complaints_long
+    .groupby(["Month", "Month_num"], as_index=False)["Complaints"]
+    .sum()
+    .sort_values("Month_num")
+    .drop(columns=["Month_num"])
+)
+
+st.dataframe(complaints_mom, use_container_width=True, hide_index=True)
+
+# Ensure correct month order (you already have MONTHS list)
+complaints_mom["Month"] = pd.Categorical(complaints_mom["Month"], categories=MONTHS, ordered=True)
+complaints_mom = complaints_mom.sort_values("Month")
+
+# --- Line chart with labels
+fig_line = go.Figure()
+fig_line.add_trace(
+    go.Scatter(
+        x=complaints_mom["Month"],
+        y=complaints_mom["Complaints"],
+        mode="lines+markers+text",
+        text=[abbr_k(v) for v in complaints_mom["Complaints"]],
+        textposition="top center",
+        name="Complaints",
+    )
+)
+fig_line.update_layout(
+    xaxis_title="Month",
+    yaxis_title="Complaints",
+    margin=dict(l=10, r=10, t=20, b=10),
+)
+st.plotly_chart(fig_line, use_container_width=True)
+
+# --- Bar chart with labels
+complaints_mom_bar = complaints_mom.copy()
+complaints_mom_bar["Label"] = complaints_mom_bar["Complaints"].apply(abbr_k)
+
+fig_bar = px.bar(
+    complaints_mom_bar,
+    x="Month",
+    y="Complaints",
+    text="Label"
+)
+fig_bar.update_traces(textposition="outside")
+fig_bar.update_layout(
+    xaxis_title="Month",
+    yaxis_title="Complaints",
+    margin=dict(l=10, r=10, t=20, b=10),
+)
+st.plotly_chart(fig_bar, use_container_width=True)
+
+complaints_mom_chart = (
+    complaints_long
+    .groupby(["Month", "Month_num"], as_index=False)["Complaints"]
+    .sum()
+    .sort_values("Month_num")
+)
+complaints_mom_chart["Month"] = pd.Categorical(complaints_mom_chart["Month"], categories=MONTHS, ordered=True)
+
+st.line_chart(complaints_mom_chart.set_index("Month")[["Complaints"]])
+
+
+st.subheader("🏥 Complaints by Partner (YTD)")
+
+complaints_partner = (
+    complaints_long
+    .groupby("Product", as_index=False)["Complaints"]
+    .sum()
+    .sort_values("Complaints", ascending=False)
+)
+
+st.dataframe(
+    complaints_partner.rename(columns={"Product": "Partner"}),
+    use_container_width=True,
+    hide_index=True
+)
+
+complaints_partner_plot = complaints_partner.rename(columns={"Product": "Partner"}).copy()
+complaints_partner_plot["Label"] = complaints_partner_plot["Complaints"].apply(abbr_k)
+
+fig_partner = px.bar(
+    complaints_partner_plot.sort_values("Complaints", ascending=False),
+    x="Partner",
+    y="Complaints",
+    text="Label"
+)
+fig_partner.update_traces(textposition="outside")
+fig_partner.update_layout(
+    xaxis_title="Partner",
+    yaxis_title="Complaints",
+    margin=dict(l=10, r=10, t=20, b=10),
+)
+st.plotly_chart(fig_partner, use_container_width=True)
+
+
+st.subheader("📊 Complaints – Partner × Month")
+
+complaints_pivot = (
+    complaints_long
+    .pivot_table(
+        index="Product",
+        columns="Month",
+        values="Complaints",
+        aggfunc="sum",
+        fill_value=0
+    )
+    .reset_index()
+)
+
+st.dataframe(
+    complaints_pivot.rename(columns={"Product": "Partner"}),
+    use_container_width=True
+)
